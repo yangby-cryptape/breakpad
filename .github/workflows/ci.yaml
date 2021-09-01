@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+    branches: [ develop, test/* ]
+  pull_request:
+    branches: [ develop ]
+defaults:
+  run:
+    shell: bash
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+      fail-fast: true
+      max-parallel: 3
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: "recursive"
+      - run: |
+          ./configure
+          make all
+  success:
+    name: Success
+    if: ${{ success() }}
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Succeed
+        run: exit 0

@@ -80,3 +80,7 @@ dependent repos are up-to-date.
     click on it, then “Add reviewer”, and enter in the code reviewer. Depending
     on your settings, you may not see an email, but the reviewer has been
     notified with google-breakpad-dev@googlegroups.com always CC’d.
+
+## About This Fork
+
+The information about this fork can be found in [README.fork.md](README.fork.md).

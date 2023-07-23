@@ -13,7 +13,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        # TODO Fix make in windows-latest
+        os: [ ubuntu-latest, macos-latest ]
       fail-fast: true
       max-parallel: 3
     steps:

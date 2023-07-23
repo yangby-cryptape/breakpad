@@ -7,6 +7,3 @@
 [submodule "src/third_party/lss"]
 	path = src/third_party/lss
 	url = https://chromium.googlesource.com/linux-syscall-support/
-[submodule "src/tools/gyp"]
-	path = src/tools/gyp
-	url = https://chromium.googlesource.com/external/gyp/

@@ -1,6 +1,6 @@
 // -*- mode: c++ -*-
 
-// Copyright (c) 2010 Google Inc. All Rights Reserved.
+// Copyright 2010 Google LLC
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
@@ -12,7 +12,7 @@
 // copyright notice, this list of conditions and the following disclaimer
 // in the documentation and/or other materials provided with the
 // distribution.
-//     * Neither the name of Google Inc. nor the names of its
+//     * Neither the name of Google LLC nor the names of its
 // contributors may be used to endorse or promote products derived from
 // this software without specific prior written permission.
 //
@@ -258,10 +258,13 @@ class DIEHandler {
 
 // A subclass of DIEHandler, with additional kludges for handling the
 // compilation unit's root die.
-class RootDIEHandler: public DIEHandler {
+class RootDIEHandler : public DIEHandler {
  public:
-  RootDIEHandler() { }
-  virtual ~RootDIEHandler() { }
+  bool handle_inline;
+
+  explicit RootDIEHandler(bool handle_inline = false)
+      : handle_inline(handle_inline) {}
+  virtual ~RootDIEHandler() {}
 
   // We pass the values reported via Dwarf2Handler::StartCompilationUnit
   // to this member function, and skip the entire compilation unit if it

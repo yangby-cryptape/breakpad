@@ -1,7 +1,6 @@
 // -*- mode: c++ -*-
 
-// Copyright (c) 2010 Google Inc.
-// All rights reserved.
+// Copyright 2010 Google LLC
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
@@ -13,7 +12,7 @@
 // copyright notice, this list of conditions and the following disclaimer
 // in the documentation and/or other materials provided with the
 // distribution.
-//     * Neither the name of Google Inc. nor the names of its
+//     * Neither the name of Google LLC nor the names of its
 // contributors may be used to endorse or promote products derived from
 // this software without specific prior written permission.
 //
@@ -38,6 +37,7 @@
 #ifndef COMMON_LINUX_MODULE_H__
 #define COMMON_LINUX_MODULE_H__
 
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -46,7 +46,9 @@
 #include <string>
 #include <vector>
 
+#include "common/string_view.h"
 #include "common/symbol_data.h"
+#include "common/unordered.h"
 #include "common/using_std_string.h"
 #include "google_breakpad/common/breakpad_types.h"
 
@@ -101,7 +103,7 @@ class Module {
 
   // A function.
   struct Function {
-    Function(const string& name_input, const Address& address_input) :
+    Function(StringView name_input, const Address& address_input) :
         name(name_input), address(address_input), parameter_size(0) {}
 
     // For sorting by address.  (Not style-guide compliant, but it's
@@ -111,7 +113,7 @@ class Module {
     }
 
     // The function's name.
-    string name;
+    StringView name;
 
     // The start address and the address ranges covered by the function.
     const Address address;
@@ -126,21 +128,24 @@ class Module {
 
     // Inlined call sites belonging to this functions.
     vector<std::unique_ptr<Inline>> inlines;
+
+    // If this symbol has been folded with other symbols in the linked binary.
+    bool is_multiple = false;
+
+    // If the function's name should be filled out from a matching Extern,
+    // should they not match.
+    bool prefer_extern_name = false;
   };
 
   struct InlineOrigin {
-    InlineOrigin(const string& name): id(-1), name(name), file(NULL) {}
+    explicit InlineOrigin(StringView name) : id(-1), name(name) {}
 
     // A unique id for each InlineOrigin object. INLINE records use the id to
     // refer to its INLINE_ORIGIN record.
     int id;
 
     // The inlined function's name.
-    string name;
-
-    File* file;
-
-    int getFileID() const { return file ? file->source_id : -1; }
+    StringView name;
   };
 
   // A inlined call site.
@@ -148,11 +153,14 @@ class Module {
     Inline(InlineOrigin* origin,
            const vector<Range>& ranges,
            int call_site_line,
+           int call_site_file_id,
            int inline_nest_level,
            vector<std::unique_ptr<Inline>> child_inlines)
         : origin(origin),
           ranges(ranges),
           call_site_line(call_site_line),
+          call_site_file_id(call_site_file_id),
+          call_site_file(nullptr),
           inline_nest_level(inline_nest_level),
           child_inlines(std::move(child_inlines)) {}
 
@@ -163,11 +171,60 @@ class Module {
 
     int call_site_line;
 
+    // The id is only meanful inside a CU. It's only used for looking up real
+    // File* after scanning a CU.
+    int call_site_file_id;
+
+    File* call_site_file;
+
     int inline_nest_level;
 
     // A list of inlines which are children of this inline.
     vector<std::unique_ptr<Inline>> child_inlines;
+
+    int getCallSiteFileID() const {
+      return call_site_file ? call_site_file->source_id : -1;
+    }
+
+    static void InlineDFS(
+        vector<std::unique_ptr<Module::Inline>>& inlines,
+        std::function<void(std::unique_ptr<Module::Inline>&)> const& forEach) {
+      for (std::unique_ptr<Module::Inline>& in : inlines) {
+        forEach(in);
+        InlineDFS(in->child_inlines, forEach);
+      }
+    }
   };
+
+  typedef map<uint64_t, InlineOrigin*> InlineOriginByOffset;
+
+  class InlineOriginMap {
+   public:
+    // Add INLINE ORIGIN to the module. Return a pointer to origin .
+    InlineOrigin* GetOrCreateInlineOrigin(uint64_t offset, StringView name);
+
+    // offset is the offset of a DW_TAG_subprogram. specification_offset is the
+    // value of its DW_AT_specification or equals to offset if
+    // DW_AT_specification doesn't exist in that DIE.
+    void SetReference(uint64_t offset, uint64_t specification_offset);
+
+    ~InlineOriginMap() {
+      for (const auto& iter : inline_origins_) {
+        delete iter.second;
+      }
+    }
+
+   private:
+    // A map from a DW_TAG_subprogram's offset to the DW_TAG_subprogram.
+    InlineOriginByOffset inline_origins_;
+
+    // A map from a DW_TAG_subprogram's offset to the offset of its
+    // specification or abstract origin subprogram. The set of values in this
+    // map should always be the same set of keys in inline_origins_.
+    map<uint64_t, uint64_t> references_;
+  };
+
+  map<std::string, InlineOriginMap> inline_origin_maps;
 
   // A source line.
   struct Line {
@@ -187,6 +244,8 @@ class Module {
     explicit Extern(const Address& address_input) : address(address_input) {}
     const Address address;
     string name;
+    // If this symbol has been folded with other symbols in the linked binary.
+    bool is_multiple = false;
   };
 
   // A map from register names to postfix expressions that recover
@@ -227,23 +286,39 @@ class Module {
   };
 
   struct InlineOriginCompare {
-    bool operator() (const InlineOrigin* lhs, const InlineOrigin* rhs) const {
-      if (lhs->getFileID() == rhs->getFileID())
-        return lhs->name < rhs->name;
-      return lhs->getFileID() < rhs->getFileID();
+    bool operator()(const InlineOrigin* lhs, const InlineOrigin* rhs) const {
+      return lhs->name < rhs->name;
     }
   };
 
   struct ExternCompare {
-    bool operator() (const Extern* lhs, const Extern* rhs) const {
+    // Defining is_transparent allows
+    // std::set<std::unique_ptr<Extern>, ExternCompare>::find() to be called
+    // with an Extern* and have set use the overloads below.
+    using is_transparent = void;
+    bool operator() (const std::unique_ptr<Extern>& lhs,
+                     const std::unique_ptr<Extern>& rhs) const {
+      return lhs->address < rhs->address;
+    }
+    bool operator() (const Extern* lhs, const std::unique_ptr<Extern>& rhs) const {
+      return lhs->address < rhs->address;
+    }
+    bool operator() (const std::unique_ptr<Extern>& lhs, const Extern* rhs) const {
       return lhs->address < rhs->address;
     }
   };
 
   // Create a new module with the given name, operating system,
   // architecture, and ID string.
-  Module(const string& name, const string& os, const string& architecture,
-         const string& id, const string& code_id = "");
+  // NB: `enable_multiple_field` is temporary while transitioning to enabling
+  // writing the multiple field permanently.
+  Module(const string& name,
+         const string& os,
+         const string& architecture,
+         const string& id,
+         const string& code_id = "",
+         bool enable_multiple_field = false,
+         bool prefer_extern_name = false);
   ~Module();
 
   // Set the module's load address to LOAD_ADDRESS; addresses given
@@ -277,12 +352,12 @@ class Module {
   // Add STACK_FRAME_ENTRY to the module.
   // This module owns all StackFrameEntry objects added with this
   // function: destroying the module destroys them as well.
-  void AddStackFrameEntry(StackFrameEntry* stack_frame_entry);
+  void AddStackFrameEntry(std::unique_ptr<StackFrameEntry> stack_frame_entry);
 
   // Add PUBLIC to the module.
   // This module owns all Extern objects added with this function:
   // destroying the module destroys them as well.
-  void AddExtern(Extern* ext);
+  void AddExtern(std::unique_ptr<Extern> ext);
 
   // If this module has a file named NAME, return a pointer to it. If
   // it has none, then create one and return a pointer to the new
@@ -332,7 +407,8 @@ class Module {
 
   // This function should be called before AssignSourceIds() to get the set of
   // valid InlineOrigins*.
-  void CreateInlineOrigins();
+  void CreateInlineOrigins(
+      set<InlineOrigin*, InlineOriginCompare>& inline_origins);
 
   // Call AssignSourceIds, and write this module to STREAM in the
   // breakpad symbol format. Return true if all goes well, or false if
@@ -347,6 +423,13 @@ class Module {
   // Addresses in the output are all relative to the load address
   // established by SetLoadAddress.
   bool Write(std::ostream& stream, SymbolData symbol_data);
+
+  // Place the name in the global set of strings. Return a StringView points to
+  // a string inside the pool.
+  StringView AddStringToPool(const string& str) {
+    auto result = common_strings_.insert(str);
+    return *(result.first);
+  }
 
   string name() const { return name_; }
   string os() const { return os_; }
@@ -393,26 +476,42 @@ class Module {
   // A set containing Function structures, sorted by address.
   typedef set<Function*, FunctionCompare> FunctionSet;
 
-  // A set containing Function structures, sorted by address.
-  typedef set<InlineOrigin*, InlineOriginCompare> InlineOriginSet;
-
   // A set containing Extern structures, sorted by address.
-  typedef set<Extern*, ExternCompare> ExternSet;
+  typedef set<std::unique_ptr<Extern>, ExternCompare> ExternSet;
 
   // The module owns all the files and functions that have been added
   // to it; destroying the module frees the Files and Functions these
   // point to.
   FileByNameMap files_;    // This module's source files.
   FunctionSet functions_;  // This module's functions.
-  InlineOriginSet inline_origins_; // This module's inline origins.
+  // Used to quickly look up whether a function exists at a particular address.
+  unordered_set<Address> function_addresses_;
 
   // The module owns all the call frame info entries that have been
   // added to it.
-  vector<StackFrameEntry*> stack_frame_entries_;
+  vector<std::unique_ptr<StackFrameEntry>> stack_frame_entries_;
 
   // The module owns all the externs that have been added to it;
   // destroying the module frees the Externs these point to.
   ExternSet externs_;
+
+  unordered_set<string> common_strings_;
+
+  // Whether symbols sharing an address should be collapsed into a single entry
+  // and marked with an `m` in the output. See
+  // https://bugs.chromium.org/p/google-breakpad/issues/detail?id=751 and docs
+  // at
+  // https://chromium.googlesource.com/breakpad/breakpad/+/master/docs/symbol_files.md#records-3
+  bool enable_multiple_field_;
+
+  // If a Function and an Extern share the same address but have a different
+  // name, prefer the name of the Extern.
+  //
+  // Use this when dumping Mach-O .dSYMs built with -gmlt (Minimum Line Tables),
+  // as the Function's fully-qualified name will only be present in the STABS
+  // (which are placed in the Extern), not in the DWARF symbols (which are
+  // placed in the Function).
+  bool prefer_extern_name_;
 };
 
 }  // namespace google_breakpad

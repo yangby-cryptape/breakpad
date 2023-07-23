@@ -1,5 +1,4 @@
-// Copyright (c) 2006, Google Inc.
-// All rights reserved.
+// Copyright 2006 Google LLC
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
@@ -11,7 +10,7 @@
 // copyright notice, this list of conditions and the following disclaimer
 // in the documentation and/or other materials provided with the
 // distribution.
-//     * Neither the name of Google Inc. nor the names of its
+//     * Neither the name of Google LLC nor the names of its
 // contributors may be used to endorse or promote products derived from
 // this software without specific prior written permission.
 //
@@ -50,9 +49,12 @@ struct StackFrame {
     FRAME_TRUST_CFI_SCAN,  // Found while scanning stack using call frame info
     FRAME_TRUST_FP,        // Derived from frame pointer
     FRAME_TRUST_CFI,       // Derived from call frame info
-    FRAME_TRUST_PREWALKED, // Explicitly provided by some external stack walker.
+    // Explicitly provided by some external stack walker.
+    FRAME_TRUST_PREWALKED,
     FRAME_TRUST_CONTEXT,   // Given as instruction pointer in a context
-    FRAME_TRUST_INLINE     // Found by inline records in symbol files.
+    FRAME_TRUST_INLINE,    // Found by inline records in symbol files.
+    // Derived from leaf function by simulating a return.
+    FRAME_TRUST_LEAF,
   };
 
   StackFrame()
@@ -63,7 +65,8 @@ struct StackFrame {
         source_file_name(),
         source_line(0),
         source_line_base(),
-        trust(FRAME_TRUST_NONE){}
+        trust(FRAME_TRUST_NONE),
+        is_multiple(false) {}
   virtual ~StackFrame() {}
 
   // Return a string describing how this stack frame was found
@@ -84,7 +87,9 @@ struct StackFrame {
         return "stack scanning";
       case StackFrame::FRAME_TRUST_INLINE:
         return "inline record";
-      default:
+      case StackFrame::FRAME_TRUST_LEAF:
+        return "simulating a return from leaf function";
+    default:
         return "unknown";
     }
   }
@@ -140,6 +145,12 @@ struct StackFrame {
   // Amount of trust the stack walker has in the instruction pointer
   // of this frame.
   FrameTrust trust;
+
+  // True if the frame corresponds to multiple functions, for example as the
+  // result of identical code folding by the linker. In that case the function
+  // name, filename, etc. information above represents the state of an arbitrary
+  // one of these functions.
+  bool is_multiple;
 };
 
 }  // namespace google_breakpad
